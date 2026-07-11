@@ -164,7 +164,7 @@ async function main() {
   try {
     let batchNumber = 1;
 
-    // Check 1: Jab tak success count target se kam hai
+    // Loop tab tak chalega jab tak hum targeted success reach nahi kar lete
     while (totalSuccessCount < TARGET_SUCCESS) {
       const users = await UserDB.find({
         $or: [
@@ -183,24 +183,29 @@ async function main() {
       );
 
       for (const user of users) {
-        // Check 2: Har user ko process karne se pehle check karein
+        // Har user ko process karne se pehle check karenge
         if (totalSuccessCount >= TARGET_SUCCESS) {
-          console.log(
-            `\n🎯 Stop Signal: Target of ${TARGET_SUCCESS} success responses reached!`,
-          );
           break; // For loop se bahar
         }
 
         await processUser(user, validPincodes);
       }
 
-      // Check 3: Agar for loop break hua hai target ki wajah se, toh while bhi break karein
-      if (totalSuccessCount >= TARGET_SUCCESS) break;
+      // Agar target success reach ho gaya hai, toh while loop bhi break karein
+      if (totalSuccessCount >= TARGET_SUCCESS) {
+        break;
+      }
 
       console.log(`\n--- Batch ${batchNumber} Summary ---`);
       console.log(`🔥 Total API Hits: ${totalApiHits}`);
       console.log(`✅ Success Leads: ${totalSuccessCount}`);
       batchNumber++;
+    }
+
+    if (totalSuccessCount >= TARGET_SUCCESS) {
+      console.log(
+        `\n🎯 Stop Signal: Target of ${TARGET_SUCCESS} success responses reached!`,
+      );
     }
   } catch (err) {
     console.error("🚫 Error in main loop:", err);

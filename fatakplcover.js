@@ -897,22 +897,30 @@ async function getLeadsBatch(skip, limit) {
 async function runBatchConcurrently(client, leadsBatch) {
   const results = [];
   const concurrency = Math.min(MAX_THREADS, leadsBatch.length);
-  let nextIndex = 0;
-  let started = 0;
+  let nextIndex = 0; // Har worker ke pick karne ke liye next pointer index
+  let started = 0;   // Processed leads counter tracker
 
+  // Worker loop jo tab tak chalega jab tak batch ke saare leads khatam nahi ho jaate
   async function worker() {
     while (true) {
-      const i = nextIndex++;
-      if (i >= leadsBatch.length) return;
+      const currentIndex = nextIndex++;
+      // Agar batch ke saare leads process ho gaye hain, toh exit karein
+      if (currentIndex >= leadsBatch.length) {
+        return;
+      }
 
+      const currentLead = leadsBatch[currentIndex];
       try {
+        // processSingleLead aur 45s timeout ke beech race karwate hain
         const result = await Promise.race([
-          processSingleLead(client, leadsBatch[i]),
+          processSingleLead(client, currentLead),
           sleep(45000).then(() => {
             throw new Error("processSingleLead timed out after 45s");
           }),
         ]);
-        if (result) results.push(result);
+        if (result) {
+          results.push(result);
+        }
       } catch (e) {
         logger.error(`⚠️ Future error: ${e.message}`);
         counters.incrementApiErrors();
@@ -925,8 +933,7 @@ async function runBatchConcurrently(client, leadsBatch) {
     }
   }
 
-  // Stagger the *start* of each worker's first task by THREAD_DELAY,
-  // matching Python's "submit then sleep(THREAD_DELAY)" pattern.
+  // Stagger workers start (har worker ke shuru hone me thoda delay dete hain)
   const workers = [];
   for (let w = 0; w < concurrency; w++) {
     workers.push(worker());
@@ -1020,23 +1027,32 @@ async function main() {
     logger.info(`📊 Processing: ${totalLeads} leads in ${totalBatches} batches`);
 
     let successfulProcessing = 0;
+    let skip = SKIP;
+    let processedLeadsCount = 0;
+    let batchNum = 1;
 
-    for (let batchNum = 0; batchNum < totalBatches; batchNum++) {
-      const skip = SKIP + batchNum * BATCH_SIZE;
-      const limit = Math.min(BATCH_SIZE, MAX_LEADS - batchNum * BATCH_SIZE);
-
-      if (limit <= 0) break;
+    // Har batch ko sequentially process karenge jab tak max leads reach na ho jayein
+    while (processedLeadsCount < totalLeads) {
+      // Is batch ke liye kitne leads fetch karne hain use limit calculate karenge
+      const limit = Math.min(BATCH_SIZE, totalLeads - processedLeadsCount);
+      if (limit <= 0) {
+        break;
+      }
 
       const leadsBatch = await getLeadsBatch(skip, limit);
-      if (!leadsBatch.length) break;
+      if (leadsBatch.length === 0) {
+        logger.info("🏁 No more leads found in the database. Exiting loop.");
+        break;
+      }
 
-      const batchSuccess = await processBatch(client, leadsBatch, batchNum + 1);
+      const batchSuccess = await processBatch(client, leadsBatch, batchNum);
       successfulProcessing += batchSuccess;
 
+      // Stats aur progress metrics display karenge
       const stats = counters.getStats();
-      const progressPct = totalBatches > 0 ? ((batchNum + 1) / totalBatches) * 100 : 100;
+      const progressPct = totalBatches > 0 ? (batchNum / totalBatches) * 100 : 100;
 
-      logger.info(`📈 OVERALL PROGRESS: ${batchNum + 1}/${totalBatches} (${progressPct.toFixed(1)}%)`);
+      logger.info(`📈 OVERALL PROGRESS: ${batchNum}/${totalBatches} (${progressPct.toFixed(1)}%)`);
       logger.info(`   🚀 Current Rate: ${stats.currentRate.toFixed(1)} leads/sec`);
       logger.info(`   ✅ Eligible: ${stats.eligibilitySuccess}`);
       logger.info(`   ❌ Failed: ${stats.rejectedLeads + stats.apiErrors}`);
@@ -1047,7 +1063,13 @@ async function main() {
         stats.recentFailed.slice(-3).forEach((f) => logger.info(`      ❌ ${f.phone}: ${f.status}`));
       }
 
-      if (batchNum < totalBatches - 1) {
+      // Next batch indexes update karenge
+      processedLeadsCount += leadsBatch.length;
+      skip += leadsBatch.length;
+      batchNum++;
+
+      // Next batch se pehle delay denge, par aakhri batch ke baad delay nahi denge
+      if (processedLeadsCount < totalLeads) {
         logger.info(`⏳ Waiting ${BATCH_DELAY / 1000}s before next batch...`);
         await sleep(BATCH_DELAY);
       }

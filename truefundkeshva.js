@@ -233,7 +233,6 @@ function delay(ms) {
 
 async function main() {
   let totalRegisteredSuccessfully = 0;
-  let hasMoreUsers = true;
 
   console.log("🚦 Starting TrueFund lead synchronization with explicit criteria checks...");
   console.log(`🎯 Targeted successful synchronizations limit: ${MAX_SUCCESSFUL_LEADS}\n`);
@@ -250,14 +249,9 @@ async function main() {
     console.log(`📊 Target Collection: "${UserDB.collection.name}"`);
     console.log(`📊 Absolute total documents in collection (unfiltered): ${totalDocsInCollection}`);
 
-    while (hasMoreUsers) {
-      if (totalRegisteredSuccessfully >= MAX_SUCCESSFUL_LEADS) {
-        console.log(`\n🛑 Reached target limit of ${MAX_SUCCESSFUL_LEADS} successful synchronizations. Halting process.`);
-        hasMoreUsers = false;
-        break;
-      }
-
-      // Fetch documents lacking the unique REF_ARR_NAME marker
+    // Loop tab tak chalega jab tak hume targeted success limit nahi mil jati
+    while (totalRegisteredSuccessfully < MAX_SUCCESSFUL_LEADS) {
+      // Unprocessed documents find karenge jinme REF_ARR_NAME marker na ho
       const users = await UserDB.find({
         $or: [
           { RefArr: { $exists: false } },
@@ -278,8 +272,6 @@ async function main() {
         } else {
           console.log("❌ Warning: The collection is completely empty. Double-check your database name or connection string.");
         }
-        
-        hasMoreUsers = false;
         break;
       }
 
@@ -290,8 +282,15 @@ async function main() {
         `📊 Batch Completed. Total successful syncs so far: ${totalRegisteredSuccessfully}/${MAX_SUCCESSFUL_LEADS}`
       );
 
-      console.log("⏳ Waiting 1 second before next batch...");
-      await delay(1000);
+      // Agar target limit bachi hai, tabhi 1 second wait karein
+      if (totalRegisteredSuccessfully < MAX_SUCCESSFUL_LEADS) {
+        console.log("⏳ Waiting 1 second before next batch...");
+        await delay(1000);
+      }
+    }
+
+    if (totalRegisteredSuccessfully >= MAX_SUCCESSFUL_LEADS) {
+      console.log(`\n🛑 Reached target limit of ${MAX_SUCCESSFUL_LEADS} successful synchronizations. Halting process.`);
     }
 
     console.log("--------------------------------------------------");

@@ -203,19 +203,27 @@ async function sendLead(lead, headers) {
 // ---------------- CONCURRENCY HELPER ---------------- //
 
 /**
- * Mirrors ThreadPoolExecutor(max_workers=MAX_WORKERS): runs `items` through
- * `fn` with at most `limit` running concurrently, and resolves once all
- * have settled (success or failure), same as as_completed() + try/except.
+ * Concurrency helper function jo leads ko concurrent batches (workers) me run karta hai.
+ * Yeh dynamic workers pool setup karta hai jo shared index se items pull karte hain.
  */
 async function runWithConcurrencyLimit(items, limit, fn) {
   let successCount = 0;
-  let index = 0;
+  let nextIndex = 0; // Agla item pick karne ke liye index pointer
 
+  // Worker jo dynamic tarike se items ko consume karega jab tak array khatam nahi hota
   async function worker() {
-    while (index < items.length) {
-      const current = items[index++];
+    while (nextIndex < items.length) {
+      // nextIndex ko fetch aur increment karte hain (Javascript single-threaded hai isliye yeh safe hai)
+      const currentIndex = nextIndex++;
+      
+      // Safety check agar increment operations boundary exceed kar jayein
+      if (currentIndex >= items.length) {
+        break;
+      }
+
+      const currentItem = items[currentIndex];
       try {
-        await fn(current);
+        await fn(currentItem);
         successCount++;
       } catch (e) {
         log("ERROR", `FAILED → ${e.message}`);
@@ -223,9 +231,11 @@ async function runWithConcurrencyLimit(items, limit, fn) {
     }
   }
 
-  const workers = Array.from({ length: Math.min(limit, items.length) }, () =>
-    worker(),
-  );
+  // Workers ki list create karte hain aur unhe concurrently start karte hain
+  const workerCount = Math.min(limit, items.length);
+  const workers = Array.from({ length: workerCount }, () => worker());
+
+  // Wait karenge jab tak saare workers apna kaam complete nahi kar lete
   await Promise.all(workers);
 
   return successCount;
