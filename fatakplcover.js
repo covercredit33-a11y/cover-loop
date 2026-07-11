@@ -24,7 +24,7 @@ const FATAKPAY_PASSWORD = "cdcbb765b95f0cf06d0f";
 // Processing Configuration
 const MAX_LEADS = 318716;
 const SKIP = 0;
-const BATCH_SIZE = 5000;
+const BATCH_SIZE = 1;
 const MAX_THREADS = 40; // max concurrency per batch
 const MAX_RETRIES = 3;
 const RETRY_BACKOFF = 1.5;
@@ -73,7 +73,7 @@ async function connectMongo() {
   mongoClient = new MongoClient(MONGO_URI_COVER);
   await mongoClient.connect();
   const db = mongoClient.db(); // db name comes from the URI path, matches mongoengine's connect(host=...)
-  leadCol = db.collection("payme");
+  leadCol = db.collection("api_user");
   responseCol = db.collection("fatakpayPlResponse");
   logger.info("✅ Connected to MongoDB");
 }

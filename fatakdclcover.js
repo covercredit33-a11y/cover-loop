@@ -66,14 +66,14 @@ const logger = {
 // ==================== MONGO SETUP ==================== //
 
 let mongoClient;
-let leadCol; // "Cashkubir"
-let responseCol; // "fatakpayDCLResponse"
+let leadCol;
+let responseCol;
 
 async function connectMongo() {
   mongoClient = new MongoClient(MONGO_URI_COVER);
   await mongoClient.connect();
   const db = mongoClient.db(); // db name comes from the URI path, matches mongoengine's connect(host=...)
-  leadCol = db.collection("Cashkubir");
+  leadCol = db.collection("api_user");
   responseCol = db.collection("fatakpayDCLResponse");
   logger.info("✅ Connected to MongoDB");
 }
