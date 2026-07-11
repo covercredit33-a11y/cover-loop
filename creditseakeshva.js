@@ -16,6 +16,14 @@ const UserDB = mongoose.model(
   new mongoose.Schema({}, { collection: "smcoll", strict: false }),
 );
 
+// ✅ Naya collection: har lead ka response yahan bhi alag se save hoga
+// (name, pan, phone, api_response, createdAt)
+const RESPONSE_COLLECTION_NAME = "creditseaLeadResponses";
+const ResponseDB = mongoose.model(
+  "creditseaLeadResponses",
+  new mongoose.Schema({}, { collection: RESPONSE_COLLECTION_NAME, strict: false }),
+);
+
 const PINCODE_FILE_PATH = path.join(
   __dirname,
   "xlsx",
@@ -103,6 +111,26 @@ async function LeadCreation(user) {
   }
 }
 
+// ✅ Har lead ke response ko alag collection mein bhi save karta hai
+// (existing $push wale update ke alawa, uske extra). Isse batch nahi rukega
+// agar yeh insert fail bhi ho jaaye — bas error log ho jayega.
+async function saveLeadResponse(user, apiResponse) {
+  try {
+    await ResponseDB.create({
+      name: user.name || "",
+      pan: user.pan || "",
+      phone: user.phone || "",
+      api_response: apiResponse,
+      createdAt: new Date(),
+    });
+  } catch (err) {
+    console.error(
+      `❌ Failed to save lead response (separate collection) for ${user.phone}:`,
+      err.message,
+    );
+  }
+}
+
 async function processUser(user, validPincodes) {
   let leadResponse;
   const userPincode = String(user.pincode || "").trim();
@@ -146,6 +174,10 @@ async function processUser(user, validPincodes) {
       err.message,
     );
   }
+
+  // ✅ Response ko alag collection mein bhi daal do
+  await saveLeadResponse(user, leadResponse);
+  console.log(`💾 Response logged to "${RESPONSE_COLLECTION_NAME}" for user: ${user.phone}`);
 
   if (leadResponse && leadResponse.message === "Lead generated successfully") {
     totalSuccessCount++;
