@@ -15,6 +15,7 @@ const LEAD_API_URL = "https://api.flexsalary.com/apiv1/api/LeadCustomer/Post";
 const USERNAME = "CoverMantra";
 const PASSWORD = "DvI}rMg]HyP[jXa[";
 const CAMPAIGN_ID = 9192300;
+const LENDER_NAME = "flexsalary";
 
 // ------------ CONTROL ------------ //
 
@@ -127,7 +128,7 @@ function shouldSkip(lead) {
     if (!lead[field]) return true;
   }
   if (formatDob(lead.dob) === null) return true;
-  if (lead.vivifi === true) return true;
+  if (lead.processed && lead.processed.includes(LENDER_NAME)) return true;
   return false;
 }
 
@@ -197,7 +198,14 @@ async function sendLead(lead, headers) {
     createdAt: new Date().toISOString().slice(0, 10), // YYYY-MM-DD, matches Python
   });
 
-  await leadCol.updateOne({ _id: lead._id }, { $set: { vivifi: true } });
+  await leadCol.updateOne(
+    { _id: lead._id },
+    {
+      $addToSet: {
+        processed: LENDER_NAME,
+      },
+    }
+  );
 }
 
 // ---------------- CONCURRENCY HELPER ---------------- //
@@ -260,7 +268,15 @@ async function processLeads() {
     AccessToken: token,
   };
 
-  const cursor = leadCol.find().skip(SKIP).limit(MAX_LEADS);
+  const cursor = leadCol
+    .find({
+      $or: [
+        { processed: { $exists: false } },
+        { processed: { $ne: LENDER_NAME } },
+      ],
+    })
+    .skip(SKIP)
+    .limit(MAX_LEADS);
 
   let total = 0;
   let processed = 0;

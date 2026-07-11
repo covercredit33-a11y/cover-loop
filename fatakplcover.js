@@ -20,6 +20,7 @@ const FATAKPAY_ELIGIBILITY_URL = `${FATAKPAY_BASE_URL}/external-api/v1/emi-insur
 const MONGO_URI_COVER = process.env.MONGO_URI_COVER;
 const FATAKPAY_USERNAME = "CoverMantra";
 const FATAKPAY_PASSWORD = "cdcbb765b95f0cf06d0f";
+const LENDER_NAME = "fatakpayPl";
 
 // Processing Configuration
 const MAX_LEADS = 318716;
@@ -867,7 +868,12 @@ async function processSingleLead(client, lead) {
 async function getLeadsBatch(skip, limit) {
   return leadCol
     .find(
-      {},
+      {
+        $or: [
+          { processed: { $exists: false } },
+          { processed: { $ne: LENDER_NAME } },
+        ],
+      },
       {
         projection: {
           name: 1,
@@ -988,7 +994,24 @@ async function saveResults(results) {
     }));
 
     await responseCol.insertMany(documents, { ordered: false });
-    logger.info(`💾 Saved ${documents.length} results to database`);
+    logger.info(`💾 Saved ${documents.length} results to response collection`);
+
+    // Bulk update the source leads in leadCol (api_user) to mark them as processed
+    const bulkOps = results.map((result) => ({
+      updateOne: {
+        filter: { _id: new ObjectId(result.leadId) },
+        update: {
+          $addToSet: {
+            processed: LENDER_NAME,
+          },
+        },
+      },
+    }));
+
+    if (bulkOps.length > 0) {
+      await leadCol.bulkWrite(bulkOps, { ordered: false });
+      logger.info(`💾 Updated ${bulkOps.length} leads in api_user with processed flag: ${LENDER_NAME}`);
+    }
   } catch (e) {
     logger.error(`❌ Database save error: ${e.message}`);
   }
@@ -1022,12 +1045,22 @@ async function main() {
 
     logger.info("✅ FatakPay API client ready");
 
-    const totalLeads = Math.min(await leadCol.countDocuments({}, { skip: SKIP }), MAX_LEADS);
+    const totalLeads = Math.min(
+      await leadCol.countDocuments(
+        {
+          $or: [
+            { processed: { $exists: false } },
+            { processed: { $ne: LENDER_NAME } },
+          ],
+        },
+        { skip: SKIP }
+      ),
+      MAX_LEADS
+    );
     const totalBatches = Math.ceil(Math.min(totalLeads, MAX_LEADS) / BATCH_SIZE);
     logger.info(`📊 Processing: ${totalLeads} leads in ${totalBatches} batches`);
 
     let successfulProcessing = 0;
-    let skip = SKIP;
     let processedLeadsCount = 0;
     let batchNum = 1;
 
@@ -1039,7 +1072,8 @@ async function main() {
         break;
       }
 
-      const leadsBatch = await getLeadsBatch(skip, limit);
+      // We pass SKIP since processed leads are already filtered out dynamically
+      const leadsBatch = await getLeadsBatch(SKIP, limit);
       if (leadsBatch.length === 0) {
         logger.info("🏁 No more leads found in the database. Exiting loop.");
         break;
@@ -1065,7 +1099,6 @@ async function main() {
 
       // Next batch indexes update karenge
       processedLeadsCount += leadsBatch.length;
-      skip += leadsBatch.length;
       batchNum++;
 
       // Next batch se pehle delay denge, par aakhri batch ke baad delay nahi denge
