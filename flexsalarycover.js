@@ -2,7 +2,6 @@ const { MongoClient } = require("mongodb");
 const axios = require("axios");
 require("dotenv").config();
 
-
 const MONGO_URI = process.env.MONGO_URI_COVER;
 const DB_NAME = "cover";
 
@@ -21,10 +20,15 @@ const LENDER_NAME = "flexsalary";
 
 const MAX_LEADS = 5000000;
 const SKIP = 1;
-const BATCH_SIZE = 100;
+const BATCH_SIZE = 500;
 const MAX_WORKERS = 7;
 const REQUEST_TIMEOUT = 30000; // ms
 const BATCH_DELAY = 1000; // ms
+
+// --- TOKEN REFRESH CONTROL STATE --- //
+let cachedToken = null;
+let tokenExpiryTime = null;
+const REFRESH_INTERVAL_MS = 110 * 60 * 1000; // 110 minutes in milliseconds
 
 // ---------------- LOGGING ---------------- //
 
@@ -51,6 +55,7 @@ async function connectMongo() {
 // ---------------- HELPERS ---------------- //
 
 function splitName(name) {
+  if (!name) return ["", ""];
   const parts = name.trim().split(/\s+/);
   const first = parts[0];
   const last = parts.length > 1 ? parts.slice(1).join(" ") : "";
@@ -61,27 +66,20 @@ function pad2(n) {
   return String(n).padStart(2, "0");
 }
 
-/**
- * Converts DOB to DD/MM/YYYY format.
- * Accepts Date objects or strings in common formats.
- * Returns string in DD/MM/YYYY or null if invalid.
- */
 function formatDob(dob) {
   if (!dob) return null;
 
-  // Already a Date object
   if (dob instanceof Date && !isNaN(dob.getTime())) {
     return `${pad2(dob.getDate())}/${pad2(dob.getMonth() + 1)}/${dob.getFullYear()}`;
   }
 
-  // If string, try common formats
   if (typeof dob === "string") {
     const formats = [
-      { regex: /^(\d{4})-(\d{2})-(\d{2})$/, order: ["y", "m", "d"] }, // %Y-%m-%d
-      { regex: /^(\d{2})-(\d{2})-(\d{4})$/, order: ["d", "m", "y"] }, // %d-%m-%Y
-      { regex: /^(\d{4})\/(\d{2})\/(\d{2})$/, order: ["y", "m", "d"] }, // %Y/%m/%d
-      { regex: /^(\d{2})\/(\d{2})\/(\d{4})$/, order: ["d", "m", "y"] }, // %d/%m/%Y
-      { regex: /^(\d{2})\/(\d{2})\/(\d{4})$/, order: ["m", "d", "y"] }, // %m/%d/%Y
+      { regex: /^(\d{4})-(\d{2})-(\d{2})$/, order: ["y", "m", "d"] },
+      { regex: /^(\d{2})-(\d{2})-(\d{4})$/, order: ["d", "m", "y"] },
+      { regex: /^(\d{4})\/(\d{2})\/(\d{2})$/, order: ["y", "m", "d"] },
+      { regex: /^(\d{2})\/(\d{2})\/(\d{4})$/, order: ["d", "m", "y"] },
+      { regex: /^(\d{2})\/(\d{2})\/(\d{4})$/, order: ["m", "d", "y"] },
     ];
 
     for (const fmt of formats) {
@@ -98,7 +96,6 @@ function formatDob(dob) {
       const day = Number(parts.d);
 
       const dt = new Date(year, month - 1, day);
-      // Validate the date actually exists (mirrors strptime's strictness)
       if (
         dt.getFullYear() === year &&
         dt.getMonth() === month - 1 &&
@@ -128,19 +125,40 @@ function shouldSkip(lead) {
     if (!lead[field]) return true;
   }
   if (formatDob(lead.dob) === null) return true;
-  if (lead.processed && lead.processed.includes(LENDER_NAME)) return true;
+  
+  if (lead.processed && Array.isArray(lead.processed)) {
+    const hasAlreadyProcessed = lead.processed.some(
+      (lender) => String(lender).toLowerCase() === LENDER_NAME.toLowerCase()
+    );
+    if (hasAlreadyProcessed) return true;
+  }
+  
   return false;
 }
 
-// ---------------- TOKEN ---------------- //
+// ---------------- TOKEN MANAGMENT WITH AUTO REFRESH ---------------- //
 
 async function getAccessToken() {
+  const currentTime = Date.now();
+  
+  // Agar token exist karta hai aur 110 min expire nahi hua, to wahi use karein
+  if (cachedToken && tokenExpiryTime && currentTime < tokenExpiryTime) {
+    return cachedToken;
+  }
+
+  log("INFO", cachedToken ? "🔄 Token expired (110 mins reached). Refreshing Access Token..." : "🔑 Fetching Initial Access Token...");
+  
   const res = await axios.post(
     ACCESS_TOKEN_URL,
     { UserName: USERNAME, Password: PASSWORD },
-    { headers: { "Content-Type": "application/json" } },
+    { headers: { "Content-Type": "application/json" } }
   );
-  return res.data?.Message;
+  
+  cachedToken = res.data?.Message;
+  tokenExpiryTime = Date.now() + REFRESH_INTERVAL_MS; // Next 110 minutes lock set kiye
+  
+  log("INFO", "✅ New Access Token generated and cached successfully.");
+  return cachedToken;
 }
 
 // ---------------- PAYLOAD ---------------- //
@@ -149,82 +167,106 @@ function buildPayload(doc) {
   const [first, last] = splitName(doc.name);
   const dobFormatted = formatDob(doc.dob);
 
-  return {
-    Campaign: { CampaignId: CAMPAIGN_ID, IsMobile: false },
-    PersonerDetails: {
-      FirstName: first,
-      LastName: last,
-      Email: doc.email,
-      PhoneNumber: doc.phone,
-      DateOfBirth: dobFormatted,
-      Gender: mapGender(doc.gender),
-      PanNumber: doc.pan,
-    },
-    CustomerAddressDetails: {
-      ResidenceType: 1,
-      AddressLine1: doc.NA,
-      City: doc.NA,
-      State: doc.NA,
-      PinCode: doc.pincode,
-    },
-    CustomerIncomeDetails: {
-      IncomeType: mapIncomeType(doc.employment),
-      GrossIncome: parseFloat(doc.income || 0),
-    },
-    CustomerBankDetails: {
-      AccountType: 10,
-    },
-  };
+return {
+  Campaign: {
+    CampaignId: CAMPAIGN_ID,
+    IsMobile: false,
+  },
+
+  PersonerDetails: {
+    FirstName: first,
+    LastName: last,
+    Email: doc.email || "NA",
+    PhoneNumber: doc.phone,
+    DateOfBirth: dobFormatted,
+    Gender: mapGender(doc.gender),
+    PanNumber: doc.pan,
+  },
+
+  CustomerAddressDetails: {
+    ResidenceType: 1,
+    PinCode: doc.pincode,
+  },
+
+  CustomerIncomeDetails: {
+    IncomeType: mapIncomeType(doc.employment),
+    GrossIncome: parseFloat(doc.income || 0),
+  },
+
+  CustomerBankDetails: {
+    AccountType: 10,
+  },
+};
 }
 
 // ---------------- WORKER ---------------- //
 
 async function sendLead(lead, headers) {
   const payload = buildPayload(lead);
-  console.log(payload, "\n");
+  console.log("Sending payload for:", lead.name);
 
-  const res = await axios.post(LEAD_API_URL, payload, {
-    headers,
-    timeout: REQUEST_TIMEOUT,
-  });
+  let apiResponse;
+  let isSuccess = false;
 
-  const apiResponse = res.data;
-
-  await responseCol.insertOne({
-    phone: lead.phone,
-    pan: lead.pan,
-    name: lead.name,
-    api_response: apiResponse,
-    createdAt: new Date().toISOString().slice(0, 10), // YYYY-MM-DD, matches Python
-  });
-
-  await leadCol.updateOne(
-    { _id: lead._id },
-    {
-      $addToSet: {
-        processed: LENDER_NAME,
-      },
+  try {
+    const res = await axios.post(LEAD_API_URL, payload, {
+      headers,
+      timeout: REQUEST_TIMEOUT,
+    });
+    apiResponse = res.data;
+    isSuccess = true;
+  } catch (axiosError) {
+    isSuccess = false;
+    
+    if (axiosError.response) {
+      apiResponse = axiosError.response.data;
+      log("WARN", `API Error [${axiosError.response.status}] for ${lead.name}: ${JSON.stringify(apiResponse)}`);
+    } else if (axiosError.request) {
+      apiResponse = { error: "No response received from lender API (Timeout/Network)" };
+      log("ERROR", `Network Timeout/No Response for ${lead.name}`);
+    } else {
+      apiResponse = { error: axiosError.message };
+      log("ERROR", `Request Setup Error for ${lead.name}: ${axiosError.message}`);
     }
-  );
+  }
+
+  try {
+    await responseCol.insertOne({
+      phone: lead.phone,
+      pan: lead.pan,
+      name: lead.name,
+      status: isSuccess ? "SUCCESS" : "FAILED",
+      api_response: apiResponse,
+      createdAt: new Date().toISOString().slice(0, 10),
+    });
+  } catch (dbError) {
+    log("ERROR", `Failed to insert log in responseCol: ${dbError.message}`);
+  }
+
+  try {
+    await leadCol.updateOne(
+      { _id: lead._id },
+      {
+        $addToSet: {
+          processed: LENDER_NAME,
+        },
+      }
+    );
+  } catch (dbError) {
+    log("ERROR", `Failed to update processed status in leadCol: ${dbError.message}`);
+  }
 }
 
 // ---------------- CONCURRENCY HELPER ---------------- //
 
-/**
- * Concurrency helper function jo leads ko concurrent batches (workers) me run karta hai.
- * Yeh dynamic workers pool setup karta hai jo shared index se items pull karte hain.
- */
 async function runWithConcurrencyLimit(items, limit, fn) {
   let successCount = 0;
-  let nextIndex = 0; // Agla item pick karne ke liye index pointer
+  let nextIndex = 0;
 
-  // Worker jo dynamic tarike se items ko consume karega jab tak array khatam nahi hota
   async function worker() {
     while (nextIndex < items.length) {
-      // nextIndex ko fetch aur increment karte hain (Javascript single-threaded hai isliye yeh safe hai)
       const currentIndex = nextIndex++;
       
-      // Safety check agar increment operations boundary exceed kar jayein
       if (currentIndex >= items.length) {
         break;
       }
@@ -239,19 +281,23 @@ async function runWithConcurrencyLimit(items, limit, fn) {
     }
   }
 
-  // Workers ki list create karte hain aur unhe concurrently start karte hain
   const workerCount = Math.min(limit, items.length);
   const workers = Array.from({ length: workerCount }, () => worker());
 
-  // Wait karenge jab tak saare workers apna kaam complete nahi kar lete
   await Promise.all(workers);
-
   return successCount;
 }
 
-async function processBatch(batch, headers) {
+// Dynamics headers injection inside batch injection to maintain updated tokens
+async function processBatch(batch) {
+  const token = await getAccessToken(); // Refresh check automatically before every batch
+  const headers = {
+    "Content-Type": "application/json",
+    AccessToken: token,
+  };
+
   return runWithConcurrencyLimit(batch, MAX_WORKERS, (lead) =>
-    sendLead(lead, headers),
+    sendLead(lead, headers)
   );
 }
 
@@ -262,12 +308,6 @@ function sleep(ms) {
 }
 
 async function processLeads() {
-  const token = await getAccessToken();
-  const headers = {
-    "Content-Type": "application/json",
-    AccessToken: token,
-  };
-
   const cursor = leadCol
     .find({
       $or: [
@@ -294,14 +334,14 @@ async function processLeads() {
     batch.push(lead);
 
     if (batch.length === BATCH_SIZE) {
-      processed += await processBatch(batch, headers);
+      processed += await processBatch(batch);
       batch = [];
       await sleep(BATCH_DELAY);
     }
   }
 
   if (batch.length) {
-    processed += await processBatch(batch, headers);
+    processed += await processBatch(batch);
   }
 
   log("INFO", "----- SUMMARY -----");

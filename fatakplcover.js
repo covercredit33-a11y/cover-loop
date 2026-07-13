@@ -25,7 +25,7 @@ const LENDER_NAME = "fatakpayPl";
 // Processing Configuration
 const MAX_LEADS = 318716;
 const SKIP = 0;
-const BATCH_SIZE = 1;
+const BATCH_SIZE = 2000;
 const MAX_THREADS = 40; // max concurrency per batch
 const MAX_RETRIES = 3;
 const RETRY_BACKOFF = 1.5;
@@ -990,7 +990,7 @@ async function saveResults(results) {
       pan: result.pan,
       status: result.status,
       responses: result.responses,
-      createdAt: new Date(),
+     createdAt: new Date().toISOString().split('T')[0]
     }));
 
     await responseCol.insertMany(documents, { ordered: false });
