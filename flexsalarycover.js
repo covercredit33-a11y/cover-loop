@@ -54,13 +54,27 @@ async function connectMongo() {
 
 // ---------------- HELPERS ---------------- //
 
-function splitName(name) {
-  if (!name) return ["", ""];
-  const parts = name.trim().split(/\s+/);
-  const first = parts[0];
-  const last = parts.length > 1 ? parts.slice(1).join(" ") : "";
+function splitName(doc) {
+  if (!doc) return ["NA", "NA"];
+
+  const nameStr = (doc.name || "").trim();
+  const dbLastName = (doc.last_name || "").trim();
+
+  if (dbLastName) {
+    return [nameStr || "NA", dbLastName];
+  }
+
+  const parts = nameStr.split(/\s+/);
+  const first = parts[0] || "NA";
+  let last = parts.length > 1 ? parts.slice(1).join(" ") : "";
+  
+  // 💡 सुरक्षा घेरा: अगर सिंगल नाम है और कोई सरनेम नहीं मिला, तो "NA" भेजें
+  if (!last) {
+    last = "NA"; 
+  }
+
   return [first, last];
-}
+} 
 
 function pad2(n) {
   return String(n).padStart(2, "0");
@@ -69,11 +83,18 @@ function pad2(n) {
 function formatDob(dob) {
   if (!dob) return null;
 
-  if (dob instanceof Date && !isNaN(dob.getTime())) {
+  if (dob instanceof Date && !isNaN(dob)) {
     return `${pad2(dob.getDate())}/${pad2(dob.getMonth() + 1)}/${dob.getFullYear()}`;
   }
 
   if (typeof dob === "string") {
+    dob = dob.trim();
+
+    // ISO string: 1985-02-28T00:00:00.000Z
+    if (dob.includes("T")) {
+      dob = dob.split("T")[0];
+    }
+
     const formats = [
       { regex: /^(\d{4})-(\d{2})-(\d{2})$/, order: ["y", "m", "d"] },
       { regex: /^(\d{2})-(\d{2})-(\d{4})$/, order: ["d", "m", "y"] },
@@ -91,22 +112,14 @@ function formatDob(dob) {
         parts[key] = match[idx + 1];
       });
 
-      const year = Number(parts.y);
-      const month = Number(parts.m);
-      const day = Number(parts.d);
+      const year = +parts.y;
+      const month = +parts.m;
+      const day = +parts.d;
 
-      const dt = new Date(year, month - 1, day);
-      if (
-        dt.getFullYear() === year &&
-        dt.getMonth() === month - 1 &&
-        dt.getDate() === day
-      ) {
-        return `${pad2(day)}/${pad2(month)}/${year}`;
-      }
+      return `${String(day).padStart(2, "0")}/${String(month).padStart(2, "0")}/${year}`;
     }
   }
 
-  log("ERROR", `Cannot parse DOB: ${dob}`);
   return null;
 }
 
@@ -194,7 +207,8 @@ async function getAccessToken() {
 // ---------------- PAYLOAD ---------------- //
 
 function buildPayload(doc) {
-  const [first, last] = splitName(doc.name);
+  // यहाँ अब doc.name की जगह पूरा doc पास करें
+  const [first, last] = splitName(doc); 
   const dobFormatted = formatDob(doc.dob);
 
   return {
@@ -205,7 +219,7 @@ function buildPayload(doc) {
 
     PersonerDetails: {
       FirstName: first,
-      LastName: last,
+      LastName: last, // अब यहाँ सही 'Chovatiya' चला जाएगा
       Email: doc.email || "NA",
       PhoneNumber: doc.phone,
       DateOfBirth: dobFormatted,
