@@ -120,18 +120,49 @@ function mapIncomeType(emp) {
 }
 
 function shouldSkip(lead) {
+  // 1. Basic required fields check
   const required = ["phone", "pan", "dob", "gender", "name"];
   for (const field of required) {
     if (!lead[field]) return true;
   }
   if (formatDob(lead.dob) === null) return true;
   
+  // 2. Check if already processed
   if (lead.processed && Array.isArray(lead.processed)) {
     const hasAlreadyProcessed = lead.processed.some(
       (lender) => String(lender).toLowerCase() === LENDER_NAME.toLowerCase()
     );
     if (hasAlreadyProcessed) return true;
   }
+
+  // 3. New Validation: Employment must be "salaried" (Case-Insensitive)
+  const emp = (lead.employment || "").trim().toLowerCase();
+  if (emp !== "salaried") return true;
+
+  // 4. New Validation: Income must be >= 25000 (Parses string correctly)
+  const incomeVal = parseFloat(lead.income || 0);
+  if (isNaN(incomeVal) || incomeVal < 25000) return true;
+
+  // 5. New Validation: State Exclusions (Case-Insensitive)
+  const state = (lead.state || "").trim().toLowerCase();
+  
+  // Exclude Jammu & Kashmir (Covering multiple variations)
+  const isJK = state.includes("jammu") || state.includes("kashmir") || state === "j&k" || state === "j and k";
+  
+  // Exclude North East States (7 Sisters + Sikkim)
+  const northEastStates = [
+    "arunachal pradesh",
+    "assam",
+    "manipur",
+    "meghalaya",
+    "mizoram",
+    "nagaland",
+    "tripura",
+    "sikkim"
+  ];
+  const isNorthEast = northEastStates.includes(state);
+
+  if (isJK || isNorthEast) return true;
   
   return false;
 }
@@ -141,7 +172,6 @@ function shouldSkip(lead) {
 async function getAccessToken() {
   const currentTime = Date.now();
   
-  // Agar token exist karta hai aur 110 min expire nahi hua, to wahi use karein
   if (cachedToken && tokenExpiryTime && currentTime < tokenExpiryTime) {
     return cachedToken;
   }
@@ -155,7 +185,7 @@ async function getAccessToken() {
   );
   
   cachedToken = res.data?.Message;
-  tokenExpiryTime = Date.now() + REFRESH_INTERVAL_MS; // Next 110 minutes lock set kiye
+  tokenExpiryTime = Date.now() + REFRESH_INTERVAL_MS; 
   
   log("INFO", "✅ New Access Token generated and cached successfully.");
   return cachedToken;
@@ -167,36 +197,36 @@ function buildPayload(doc) {
   const [first, last] = splitName(doc.name);
   const dobFormatted = formatDob(doc.dob);
 
-return {
-  Campaign: {
-    CampaignId: CAMPAIGN_ID,
-    IsMobile: false,
-  },
+  return {
+    Campaign: {
+      CampaignId: CAMPAIGN_ID,
+      IsMobile: false,
+    },
 
-  PersonerDetails: {
-    FirstName: first,
-    LastName: last,
-    Email: doc.email || "NA",
-    PhoneNumber: doc.phone,
-    DateOfBirth: dobFormatted,
-    Gender: mapGender(doc.gender),
-    PanNumber: doc.pan,
-  },
+    PersonerDetails: {
+      FirstName: first,
+      LastName: last,
+      Email: doc.email || "NA",
+      PhoneNumber: doc.phone,
+      DateOfBirth: dobFormatted,
+      Gender: mapGender(doc.gender),
+      PanNumber: doc.pan,
+    },
 
-  CustomerAddressDetails: {
-    ResidenceType: 1,
-    PinCode: doc.pincode,
-  },
+    CustomerAddressDetails: {
+      ResidenceType: 1,
+      PinCode: doc.pincode,
+    },
 
-  CustomerIncomeDetails: {
-    IncomeType: mapIncomeType(doc.employment),
-    GrossIncome: parseFloat(doc.income || 0),
-  },
+    CustomerIncomeDetails: {
+      IncomeType: mapIncomeType(doc.employment),
+      GrossIncome: parseFloat(doc.income || 0),
+    },
 
-  CustomerBankDetails: {
-    AccountType: 10,
-  },
-};
+    CustomerBankDetails: {
+      AccountType: 10,
+    },
+  };
 }
 
 // ---------------- WORKER ---------------- //
@@ -290,7 +320,7 @@ async function runWithConcurrencyLimit(items, limit, fn) {
 
 // Dynamics headers injection inside batch injection to maintain updated tokens
 async function processBatch(batch) {
-  const token = await getAccessToken(); // Refresh check automatically before every batch
+  const token = await getAccessToken(); 
   const headers = {
     "Content-Type": "application/json",
     AccessToken: token,
