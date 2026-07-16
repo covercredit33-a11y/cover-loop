@@ -2,7 +2,7 @@ const mongoose = require("mongoose");
 const axios = require("axios");
 require("dotenv").config();
 
-const BATCH_SIZE = 5;
+const BATCH_SIZE = 1;
 const SUBMIT_LEAD_API = "https://api-backend.truefund.in/partner/submit-lead";
 const PARTNER_API_KEY = "a3f7e92c8b4d156e9f02ab73c5d8e1f4906b2c5a8d7e3f1029b5c8a4d6e9f2b1";
 
@@ -12,9 +12,9 @@ const MAX_SUCCESSFUL_LEADS = 5;
 // Configuration placeholders
 const PARTNER_ID = "Keshava";
 const UTM_SOURCE = "KeshvaFinance";
-const REF_ARR_NAME = "truefund";
+const LENDER_NAME = "truefund"; // Label used for tracking inside the processed array
 
-const RESPONSE_COLLECTION_NAME = "truefundLeadResponses";
+const RESPONSE_COLLECTION_NAME = "truefund_response";
 
 const MONGODB_URINEW = process.env.MONGODB_read;
 
@@ -27,7 +27,6 @@ mongoose
   .connect(MONGODB_URINEW)
   .then(() => {
     console.log("✅ MongoDB Connected Successfully");
-    // Print current DB and connection details
     const conn = mongoose.connection;
     console.log(`🏠 Connected to Database: "${conn.name}" on host: "${conn.host}"`);
   })
@@ -36,13 +35,13 @@ mongoose
     process.exit(1);
   });
 
+// Main source user collection
 const UserDB = mongoose.model(
   "api_user",
   new mongoose.Schema({}, { collection: "api_user", strict: false }),
 );
 
-// Separate collection: one document per API call, holding just the
-// customer identifiers + the raw response + when it happened.
+// Response collection: stores logs of every attempt (Success or Skip/Failed)
 const ResponseDB = mongoose.model(
   "truefundLeadResponses",
   new mongoose.Schema({}, { collection: RESPONSE_COLLECTION_NAME, strict: false }),
@@ -145,27 +144,24 @@ async function submitLead(user) {
     });
 
     console.log(`✅ API Response for ${user.phone || "unknown"}:`, response.data);
-    return response.data;
+    return { success: true, data: response.data };
   } catch (err) {
     const errorData = err.response?.data || { error: err.message };
     console.error(`❌ API Error for ${user.phone || "unknown"}:`, errorData);
-    return errorData;
+    return { success: false, data: errorData };
   }
 }
 
-// Saves one record per lead into the separate response collection:
-// customer name, pan, phone, the raw api response, and createdAt.
-// This runs in addition to (not instead of) the existing $push onto
-// the user's own document, and never throws — a logging failure here
-// shouldn't stop the batch.
-async function saveLeadResponse(user, apiResponse) {
+// Logs the details into the independent response collection
+async function saveLeadResponse(user, apiResponse, status) {
   try {
     await ResponseDB.create({
-      name: user.name ? String(user.name).trim() : "",
-      pan: user.pan ? String(user.pan).trim().toUpperCase() : "",
       phone: user.phone ? String(user.phone).trim() : "",
+      pan: user.pan ? String(user.pan).trim().toUpperCase() : "",
+      name: user.name ? String(user.name).trim() : "",
+      status: status,
       api_response: apiResponse,
-      createdAt: new Date(),
+      createdAt: new Date().toISOString().slice(0, 10), // YYYY-MM-DD formatting like Flex Salary code
     });
   } catch (err) {
     console.error(`❌ Failed to save lead response for ${user.phone || "unknown"}:`, err.message);
@@ -182,39 +178,34 @@ async function processBatch(users) {
         console.log(`\n🚀 Processing Lead for user ID: ${userDoc._id} (${phone})`);
 
         const validation = validateLead(userDoc);
-        let apiResponse;
+        let apiResult;
+        let finalStatus = "FAILED";
 
         if (!validation.valid) {
           console.warn(`⚠️ Lead Skipped: ${validation.reason}`);
-          apiResponse = { status: "Skipped", success: false, reason: validation.reason, skippedByScript: true };
+          apiResult = { status: "Skipped", reason: validation.reason, skippedByScript: true };
+          finalStatus = "SKIPPED";
         } else {
-          apiResponse = await submitLead(userDoc);
+          apiResult = await submitLead(userDoc);
+          finalStatus = apiResult.success ? "SUCCESS" : "FAILED";
         }
 
-        const updateOperation = {
-          $push: {
-            apiResponse: {
-              [REF_ARR_NAME]: apiResponse,
-              createdAt: new Date().toISOString(),
-            },
-          },
-          $addToSet: {
-            RefArr: {
-              name: REF_ARR_NAME,
-              createdAt: new Date().toISOString(),
-            },
-          },
-          $unset: { accounts: "" },
-        };
-
-        await UserDB.updateOne({ _id: userDoc._id }, updateOperation);
-        console.log(`✅ Database updated for user: ${phone}`);
-
-        // Also store a standalone copy of this response in its own collection.
-        await saveLeadResponse(userDoc, apiResponse);
+        // 1. Log the response to the independent response collection
+        await saveLeadResponse(userDoc, apiResult.data || apiResult, finalStatus);
         console.log(`💾 Response logged to "${RESPONSE_COLLECTION_NAME}" for user: ${phone}`);
 
-        if (apiResponse && (apiResponse.success === true || apiResponse.statusCode === 201) && !apiResponse.skippedByScript) {
+        // 2. Update the original user doc to match Flex Salary structure: pushes lender name into "processed" array
+        await UserDB.updateOne(
+          { _id: userDoc._id },
+          {
+            $addToSet: {
+              processed: LENDER_NAME,
+            },
+          }
+        );
+        console.log(`✅ Database updated (marked as processed) for user: ${phone}`);
+
+        if (finalStatus === "SUCCESS") {
           successfullyRegisteredCount++;
           console.log(`⭐ Lead Accepted Successfully for: ${phone}`);
         }
@@ -244,34 +235,24 @@ async function main() {
       await new Promise((resolve) => mongoose.connection.once("connected", resolve));
     }
 
-    // Diagnostic Check: Total documents in the target collection
     const totalDocsInCollection = await UserDB.countDocuments({});
     console.log(`📊 Target Collection: "${UserDB.collection.name}"`);
     console.log(`📊 Absolute total documents in collection (unfiltered): ${totalDocsInCollection}`);
 
-    // Loop tab tak chalega jab tak hume targeted success limit nahi mil jati
+    // Loop runs until targeted success limit is met
     while (totalRegisteredSuccessfully < MAX_SUCCESSFUL_LEADS) {
-      // Unprocessed documents find karenge jinme REF_ARR_NAME marker na ho
+      // Flex Salary Style Exclusions: Check if "processed" array doesn't exist or doesn't contain LENDER_NAME
       const users = await UserDB.find({
         $or: [
-          { RefArr: { $exists: false } },
-          { "RefArr.name": { $ne: REF_ARR_NAME } },
+          { processed: { $exists: false } },
+          { processed: { $ne: LENDER_NAME } },
         ],
       })
         .limit(BATCH_SIZE)
         .lean();
 
       if (users.length === 0) {
-        console.log("🏁 No more unmatched documents found in the database matching the criteria.");
-        
-        // Extra Debugging Help: If absolute total > 0 but query finds nothing, it means all docs are already processed
-        if (totalDocsInCollection > 0) {
-          console.log("🔍 Info: Documents exist, but they all appear to have already been tagged with 'RefArr.name' = '" + REF_ARR_NAME + "'.");
-          const sampleDoc = await UserDB.findOne({}).lean();
-          console.log("📄 Here is a sample structure of an existing document in your collection:\n", JSON.stringify(sampleDoc, null, 2));
-        } else {
-          console.log("❌ Warning: The collection is completely empty. Double-check your database name or connection string.");
-        }
+        console.log("🏁 No more unprocessed documents found matching lender configuration criteria.");
         break;
       }
 
@@ -282,7 +263,6 @@ async function main() {
         `📊 Batch Completed. Total successful syncs so far: ${totalRegisteredSuccessfully}/${MAX_SUCCESSFUL_LEADS}`
       );
 
-      // Agar target limit bachi hai, tabhi 1 second wait karein
       if (totalRegisteredSuccessfully < MAX_SUCCESSFUL_LEADS) {
         console.log("⏳ Waiting 1 second before next batch...");
         await delay(1000);
